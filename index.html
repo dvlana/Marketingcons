@@ -6,6 +6,109 @@
 <title>TreinaCons — Instagram Analytics</title>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<script type="module">
+// ══ FIREBASE CONFIG ══
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyBVmomK1EszFzCLqfey5UESESKvAcCEZOQ",
+  authDomain: "dashboard-d9cd6.firebaseapp.com",
+  projectId: "dashboard-d9cd6",
+  storageBucket: "dashboard-d9cd6.firebasestorage.app",
+  messagingSenderId: "250895489363",
+  appId: "1:250895489363:web:4130a0fbaf867c49b8e9a6"
+};
+
+const fbApp = initializeApp(firebaseConfig);
+const db   = getFirestore(fbApp);
+
+// ══ FIREBASE HELPERS ══
+
+// Salva token e dados da conta
+window.fbSaveToken = async (token, userId) => {
+  await setDoc(doc(db, 'config', 'instagram'), { token, userId, updatedAt: new Date().toISOString() });
+  console.log('Token salvo no Firebase!');
+};
+
+// Carrega token salvo
+window.fbLoadToken = async () => {
+  const snap = await getDoc(doc(db, 'config', 'instagram'));
+  return snap.exists() ? snap.data() : null;
+};
+
+// Salva equipe (clientes + membros)
+window.fbSaveTeam = async (clients) => {
+  await setDoc(doc(db, 'config', 'team'), { clients, updatedAt: new Date().toISOString() });
+};
+
+// Carrega equipe salva
+window.fbLoadTeam = async () => {
+  const snap = await getDoc(doc(db, 'config', 'team'));
+  return snap.exists() ? snap.data().clients : null;
+};
+
+// Salva métricas do Instagram
+window.fbSaveMetrics = async (metrics) => {
+  await setDoc(doc(db, 'metrics', 'instagram'), { ...metrics, updatedAt: new Date().toISOString() });
+};
+
+// Escuta métricas em tempo real
+window.fbWatchMetrics = (callback) => {
+  return onSnapshot(doc(db, 'metrics', 'instagram'), (snap) => {
+    if (snap.exists()) callback(snap.data());
+  });
+};
+
+// ══ INICIALIZAÇÃO ══
+window.fbInit = async () => {
+  console.log('Firebase conectado!');
+
+  // Carrega token salvo
+  const saved = await window.fbLoadToken();
+  if (saved && saved.token) {
+    console.log('Token encontrado, buscando dados...');
+    window.DB_TOKEN = saved.token;
+    window.DB_USER_ID = saved.userId;
+    // Atualiza UI
+    if (document.getElementById('acName')) {
+      document.getElementById('acName').textContent = '@treinacons';
+    }
+    // Busca dados reais
+    await window.fetchIGData(saved.token, saved.userId);
+  }
+
+  // Carrega equipe salva
+  const savedTeam = await window.fbLoadTeam();
+  if (savedTeam && window.TDB) {
+    window.TDB.clients = savedTeam;
+    console.log('Equipe carregada do Firebase!');
+  }
+
+  // Escuta métricas em tempo real
+  window.fbWatchMetrics((metrics) => {
+    if (metrics.followers && document.getElementById('kf')) {
+      document.getElementById('kf').textContent = Number(metrics.followers).toLocaleString('pt-BR');
+      document.getElementById('tb-f').textContent = (metrics.followers/1000).toFixed(1)+'K';
+    }
+    if (metrics.reach && document.getElementById('kr')) {
+      document.getElementById('kr').textContent = Number(metrics.reach).toLocaleString('pt-BR');
+    }
+    if (metrics.visits && document.getElementById('kv')) {
+      document.getElementById('kv').textContent = Number(metrics.visits).toLocaleString('pt-BR');
+    }
+    if (metrics.links && document.getElementById('kl')) {
+      document.getElementById('kl').textContent = Number(metrics.links).toLocaleString('pt-BR');
+    }
+    console.log('Métricas atualizadas em tempo real!');
+  });
+};
+
+// Inicializa quando o DOM estiver pronto
+document.addEventListener('DOMContentLoaded', () => {
+  window.fbInit();
+});
+</script>
 <style>
 
 
@@ -956,12 +1059,48 @@ setInterval(()=>{
 async function fetchIG(token,userId){
   document.getElementById('lb').classList.add('on');
   try{
-    const r=await fetch(`https://graph.instagram.com/${userId||'me'}?fields=id,username,followers_count&access_token=${token}`);
+    // Busca dados básicos da conta
+    const r=await fetch(`https://graph.instagram.com/v19.0/${userId||'me'}?fields=id,username,followers_count,media_count,biography&access_token=${token}`);
     const d=await r.json();
-    if(d.username){document.getElementById('acName').textContent='@'+d.username;if(d.followers_count){DB.followers.v=d.followers_count;document.getElementById('kf').textContent=d.followers_count.toLocaleString('pt-BR');}}
-  }catch(e){console.log('Dados demo ativos.');}
+    if(d.error){console.log('Erro API:', d.error.message);showToast('Erro: '+d.error.message);return;}
+    if(d.username) document.getElementById('acName').textContent='@'+d.username;
+    if(d.followers_count){
+      DB.followers.v=d.followers_count;
+      document.getElementById('kf').textContent=d.followers_count.toLocaleString('pt-BR');
+      document.getElementById('tb-f').textContent=(d.followers_count/1000).toFixed(1)+'K';
+    }
+
+    // Busca insights (alcance, impressões, visitas)
+    try {
+      const ins=await fetch(`https://graph.instagram.com/v19.0/${d.id}/insights?metric=reach,impressions,profile_views,website_clicks&period=day&since=${Math.floor(Date.now()/1000)-2592000}&until=${Math.floor(Date.now()/1000)}&access_token=${token}`);
+      const insData=await ins.json();
+      if(insData.data){
+        let reach=0,impressions=0,visits=0,links=0;
+        insData.data.forEach(m=>{
+          const total=m.values.reduce((s,v)=>s+v.value,0);
+          if(m.name==='reach') reach=total;
+          if(m.name==='impressions') impressions=total;
+          if(m.name==='profile_views') visits=total;
+          if(m.name==='website_clicks') links=total;
+        });
+        if(reach>0){DB.reach.v=reach;document.getElementById('kr').textContent=reach.toLocaleString('pt-BR');}
+        if(visits>0){DB.visits.v=visits;document.getElementById('kv').textContent=visits.toLocaleString('pt-BR');}
+        if(links>0){DB.links.v=links;document.getElementById('kl').textContent=links.toLocaleString('pt-BR');}
+        if(impressions>0) document.getElementById('ki').textContent=(impressions/1000).toFixed(1)+'K';
+
+        // Salva métricas no Firebase
+        if(window.fbSaveMetrics){
+          window.fbSaveMetrics({followers:d.followers_count,reach,impressions,visits,links});
+        }
+      }
+    } catch(e){ console.log('Insights indisponível:', e); }
+
+    showToast('Dados reais carregados!');
+  }catch(e){console.log('Erro ao buscar dados:', e);showToast('Erro de conexão');}
   finally{document.getElementById('lb').classList.remove('on');}
 }
+// Expõe globalmente para o Firebase chamar
+window.fetchIGData = fetchIG;
 
 // UI
 let calOpen=false,selDate=null,calDate=new Date();
@@ -1017,12 +1156,12 @@ function selectClient(id){TDB.activeClientId=id;renderClientChips();renderFlow(i
 function renderFlow(id){const client=TDB.clients.find(c=>c.id===id);if(!client)return;const body=document.getElementById('teamBody');body.innerHTML=`<div class="client-hero"><div class="client-hero-ico">${client.emoji}</div><div class="client-hero-info"><div class="client-hero-name">${client.name}</div><span class="client-hero-ig">${client.ig}</span></div><div class="client-hero-actions"><button onclick="openEditClient(${id})" style="display:flex;align-items:center;gap:5px;background:rgba(91,95,207,.08);border:1px solid rgba(91,95,207,.2);border-radius:100px;padding:6px 12px;font-size:11px;font-weight:600;color:#5b5fcf;cursor:pointer;font-family:inherit">Editar</button><button onclick="openAddMember()" style="display:flex;align-items:center;gap:5px;background:linear-gradient(135deg,#3533cd,#5b5fcf);border:none;border-radius:100px;padding:6px 14px;font-size:11px;font-weight:700;color:#fff;cursor:pointer;font-family:inherit">+ Membro</button></div></div><div class="team-flow-wrap"><div class="team-flow"><div class="flow-line"></div>${client.members.map((m,i)=>`<div class="flow-node"><div class="flow-dot" style="color:${m.color};background:${m.color}"></div><div class="member-card"><div class="member-card-top" style="background:linear-gradient(135deg,${m.color}22,${m.color}11)"><span style="font-size:26px">👤</span><div class="member-card-actions"><button class="mc-btn mc-edit" onclick="openEditMember(${id},${m.id})">✏</button><button class="mc-btn mc-del" onclick="deleteMember(${id},${m.id})">🗑</button></div></div><div class="member-card-body"><div class="member-name">${m.name}</div><div class="member-role">${m.role}</div><div class="member-ig-row"><span class="member-ig" style="color:${m.color}">${m.ig}</span><button class="copy-btn" style="color:${m.color}" onclick="copyIG('${m.ig}')">📋</button></div></div></div></div>${i<client.members.length-1?'<div class="flow-connector"><div class="flow-connector-line"></div></div>':''}`).join('')}<div class="flow-connector"><div class="flow-connector-line"></div></div><div class="flow-add-node"><div class="flow-dot" style="color:#e2e3f0;background:#e2e3f0"></div><div class="flow-add-card" onclick="openAddMember()">+<span style="font-size:11px;font-weight:600">Adicionar</span></div></div></div></div><div class="ig-tags-wrap"><div class="ig-tags-label">Clique para copiar o @</div><div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">${client.members.map(m=>`<div class="ig-tag" style="background:${m.color}12;border-color:${m.color}25;color:${m.color}" onclick="copyIG('${m.ig}')">${m.ig}</div>`).join('')}<div class="ig-copy-all" onclick="copyAllIG(${id})">Copiar todos</div></div></div>`;}
 function openAddClient(){TDB.editingClientId=null;TDB.selectedEmoji='🏢';document.getElementById('mcTitle').textContent='Novo Cliente';document.getElementById('mcName').value='';document.getElementById('mcIG').value='';document.querySelectorAll('.emoji-opt').forEach((e,i)=>e.classList.toggle('picked',i===0));document.getElementById('modalClient').style.display='flex';}
 function openEditClient(id){const c=TDB.clients.find(x=>x.id===id);TDB.editingClientId=id;TDB.selectedEmoji=c.emoji;document.getElementById('mcTitle').textContent='Editar Cliente';document.getElementById('mcName').value=c.name;document.getElementById('mcIG').value=c.ig;document.querySelectorAll('.emoji-opt').forEach(e=>e.classList.toggle('picked',e.textContent.trim()===c.emoji));document.getElementById('modalClient').style.display='flex';}
-function saveClient(){const name=document.getElementById('mcName').value.trim(),ig=document.getElementById('mcIG').value.trim();if(!name){alert('Insira o nome');return;}if(TDB.editingClientId){const c=TDB.clients.find(x=>x.id===TDB.editingClientId);c.name=name;c.ig=ig;c.emoji=TDB.selectedEmoji;showToast('Atualizado!');if(TDB.activeClientId===TDB.editingClientId)renderFlow(TDB.editingClientId);}else{TDB.clients.push({id:TDB.nextClientId++,name,ig:ig||('@'+name.toLowerCase().replace(/\s/g,'')),emoji:TDB.selectedEmoji,members:[]});showToast('Cliente adicionado!');}document.getElementById('modalClient').style.display='none';renderClientChips();}
+function saveClient(){const name=document.getElementById('mcName').value.trim(),ig=document.getElementById('mcIG').value.trim();if(!name){alert('Insira o nome');return;}if(TDB.editingClientId){const c=TDB.clients.find(x=>x.id===TDB.editingClientId);c.name=name;c.ig=ig;c.emoji=TDB.selectedEmoji;showToast('Atualizado!');if(TDB.activeClientId===TDB.editingClientId)renderFlow(TDB.editingClientId);}else{TDB.clients.push({id:TDB.nextClientId++,name,ig:ig||('@'+name.toLowerCase().replace(/\s/g,'')),emoji:TDB.selectedEmoji,members:[]});showToast('Cliente adicionado!');}document.getElementById('modalClient').style.display='none';renderClientChips();if(window.fbSaveTeam)window.fbSaveTeam(TDB.clients);}
 function pickEmoji(el){document.querySelectorAll('.emoji-opt').forEach(e=>e.classList.remove('picked'));el.classList.add('picked');TDB.selectedEmoji=el.textContent.trim();}
 function openAddMember(){if(!TDB.activeClientId){showToast('Selecione um cliente primeiro');return;}TDB.editingMemberId=null;document.getElementById('mmTitle').textContent='Novo Membro';document.getElementById('mmSaveBtn').textContent='Adicionar';['mmName','mmIG','mmRole'].forEach(id=>document.getElementById(id).value='');document.getElementById('modalMember').style.display='flex';}
 function openEditMember(cId,mId){TDB.activeClientId=cId;TDB.editingMemberId=mId;const c=TDB.clients.find(x=>x.id===cId),m=c.members.find(x=>x.id===mId);document.getElementById('mmTitle').textContent='Editar Membro';document.getElementById('mmSaveBtn').textContent='Salvar';document.getElementById('mmName').value=m.name;document.getElementById('mmIG').value=m.ig;document.getElementById('mmRole').value=m.role;document.getElementById('modalMember').style.display='flex';}
-function saveMember(){const name=document.getElementById('mmName').value.trim(),ig=document.getElementById('mmIG').value.trim(),role=document.getElementById('mmRole').value.trim();if(!name||!ig){alert('Preencha nome e @');return;}const c=TDB.clients.find(x=>x.id===TDB.activeClientId),igFmt=ig.startsWith('@')?ig:'@'+ig;if(TDB.editingMemberId){const m=c.members.find(x=>x.id===TDB.editingMemberId);m.name=name;m.ig=igFmt;m.role=role||'Membro';showToast('Membro atualizado!');}else{const nid=c.members.length?Math.max(...c.members.map(x=>x.id))+1:1;c.members.push({id:nid,name,ig:igFmt,role:role||'Membro',color:COLORS[c.members.length%COLORS.length]});showToast(name+' adicionado!');}document.getElementById('modalMember').style.display='none';renderFlow(TDB.activeClientId);}
-function deleteMember(cId,mId){if(!confirm('Remover?'))return;const c=TDB.clients.find(x=>x.id===cId);c.members=c.members.filter(m=>m.id!==mId);renderFlow(cId);showToast('Removido');}
+function saveMember(){const name=document.getElementById('mmName').value.trim(),ig=document.getElementById('mmIG').value.trim(),role=document.getElementById('mmRole').value.trim();if(!name||!ig){alert('Preencha nome e @');return;}const c=TDB.clients.find(x=>x.id===TDB.activeClientId),igFmt=ig.startsWith('@')?ig:'@'+ig;if(TDB.editingMemberId){const m=c.members.find(x=>x.id===TDB.editingMemberId);m.name=name;m.ig=igFmt;m.role=role||'Membro';showToast('Membro atualizado!');}else{const nid=c.members.length?Math.max(...c.members.map(x=>x.id))+1:1;c.members.push({id:nid,name,ig:igFmt,role:role||'Membro',color:COLORS[c.members.length%COLORS.length]});showToast(name+' adicionado!');}document.getElementById('modalMember').style.display='none';renderFlow(TDB.activeClientId);if(window.fbSaveTeam)window.fbSaveTeam(TDB.clients);}
+function deleteMember(cId,mId){if(!confirm('Remover?'))return;const c=TDB.clients.find(x=>x.id===cId);c.members=c.members.filter(m=>m.id!==mId);renderFlow(cId);showToast('Removido');if(window.fbSaveTeam)window.fbSaveTeam(TDB.clients);}
 function copyIG(ig){navigator.clipboard.writeText(ig).then(()=>showToast('Copiado: '+ig));}
 function copyAllIG(id){const c=TDB.clients.find(x=>x.id===id);navigator.clipboard.writeText(c.members.map(m=>m.ig).join(' ')).then(()=>showToast('Todos copiados!'));}
 function showToast(msg){const t=document.getElementById('igToast');if(!t)return;t.textContent='✓ '+msg;t.style.opacity='1';t.style.transform='translateX(-50%) translateY(0)';clearTimeout(t._timer);t._timer=setTimeout(()=>{t.style.opacity='0';t.style.transform='translateX(-50%) translateY(20px)';},2200);}
